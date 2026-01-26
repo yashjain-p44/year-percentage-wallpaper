@@ -1,5 +1,7 @@
 # Year Percentage Wallpaper
 
+![Dynamic Wallpaper Example](examples/dynamic_wallpaper_example.png)
+
 A macOS wallpaper generator that displays the percentage of the year that has elapsed. The wallpaper updates automatically to show your year progress in real-time.
 
 ## Features
