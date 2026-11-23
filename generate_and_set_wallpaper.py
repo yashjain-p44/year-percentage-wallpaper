@@ -1,53 +1,159 @@
 #!/usr/bin/env python3
 """
-Combined script that generates a new wallpaper and sets it as the current space wallpaper.
+Generates a year-progress wallpaper for every connected display and sets it.
 Double-click this script or run from terminal.
+
+Run with --help to see the available options.
 """
 
 from PIL import Image, ImageDraw, ImageFont
 from datetime import datetime
+import argparse
+import glob
+import json
 import os
 import subprocess
 import sys
 
 # ---- CONFIG ----
-WIDTH, HEIGHT = 2560, 1600  # MacBook Pro resolution (adjust if needed)
+DEFAULT_SIZE = (2560, 1600)  # Used only if displays cannot be detected
 BACKGROUND_COLOR = "black"
 TEXT_COLOR = "white"
-FONT_SIZE = 300
+FONT_SIZE_RATIO = 0.1875  # Font size as a fraction of image height (300px at 1600px tall)
 OUTPUT_DIR = os.path.expanduser("~/wallpapers")
 FONT_PATH = "/System/Library/Fonts/SFNS.ttf"  # System font
+DEFAULT_DECIMALS = 8
+DEFAULT_KEEP = 5  # Number of generated wallpapers per run to keep on disk
+FILE_PREFIX = "dynamic_wallpaper_"
 # ----------------
 
+DETECT_SCREENS_JXA = """
+ObjC.import('AppKit');
+JSON.stringify($.NSScreen.screens.js.map(function (s) {
+    var f = s.frame, k = s.backingScaleFactor;
+    return [Math.round(f.size.width * k), Math.round(f.size.height * k)];
+}));
+"""
 
-def set_wallpaper(image_path):
+
+def detect_screen_sizes():
     """
-    Set the given image as the Mac wallpaper for the current space using AppleScript.
-    
-    Args:
-        image_path (str): Path to the image file
+    Return the pixel resolution of each connected display, in system order.
+    Falls back to DEFAULT_SIZE if detection fails.
     """
-    abs_path = os.path.abspath(image_path)
-    
-    # Escape quotes in path for AppleScript
-    escaped_path = abs_path.replace('"', '\\"')
-    
-    # AppleScript command to set wallpaper
-    applescript = f'''
-    tell application "System Events"
-        tell current desktop
-            set picture to "{escaped_path}"
-        end tell
-    end tell
-    '''
-    
     try:
-        # Execute AppleScript
-        subprocess.run(
-            ['osascript', '-e', applescript],
+        result = subprocess.run(
+            ["osascript", "-l", "JavaScript", "-e", DETECT_SCREENS_JXA],
             capture_output=True,
             text=True,
-            check=True
+            check=True,
+            timeout=10,
+        )
+        sizes = [tuple(s) for s in json.loads(result.stdout.strip())]
+        if sizes:
+            return sizes
+    except Exception as e:
+        print(f"Could not detect displays ({e}); using {DEFAULT_SIZE[0]}x{DEFAULT_SIZE[1]}")
+    return [DEFAULT_SIZE]
+
+
+def year_progress_text(now, decimals):
+    """Return the percentage of the year elapsed, formatted as a string."""
+    year_start = datetime(now.year, 1, 1)
+    year_end = datetime(now.year + 1, 1, 1)
+    percentage = (now - year_start).total_seconds() / (year_end - year_start).total_seconds() * 100
+    return f"{percentage:.{decimals}f}"
+
+
+def render_wallpaper(text, size, output_path):
+    """Render the given text centered on a background of the given size."""
+    width, height = size
+    img = Image.new("RGB", size, BACKGROUND_COLOR)
+    draw = ImageDraw.Draw(img)
+
+    font_size = int(height * FONT_SIZE_RATIO)
+    try:
+        font = ImageFont.truetype(FONT_PATH, font_size)
+    except Exception:
+        # Fallback to default font if system font not available
+        font = ImageFont.load_default()
+
+    # Shrink the font if the text would overflow the display width
+    # (e.g. portrait displays or many decimals).
+    bbox = draw.textbbox((0, 0), text, font=font)
+    max_width = width * 0.9
+    if bbox[2] - bbox[0] > max_width and hasattr(font, "size"):
+        font = ImageFont.truetype(FONT_PATH, max(1, int(font.size * max_width / (bbox[2] - bbox[0]))))
+        bbox = draw.textbbox((0, 0), text, font=font)
+
+    # Center using the bbox offsets so the text is visually centered
+    x = (width - (bbox[2] - bbox[0])) / 2 - bbox[0]
+    y = (height - (bbox[3] - bbox[1])) / 2 - bbox[1]
+    draw.text((x, y), text, fill=TEXT_COLOR, font=font)
+
+    img.save(output_path)
+
+
+def generate_wallpapers(decimals):
+    """Generate one wallpaper per display. Returns the list of image paths in display order."""
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+    now = datetime.now()
+    text = year_progress_text(now, decimals)
+    timestamp = now.strftime("%Y%m%d_%H%M%S")
+
+    paths = []
+    by_size = {}  # Reuse one image for displays with identical resolution
+    for index, size in enumerate(detect_screen_sizes()):
+        if size not in by_size:
+            filename = f"{FILE_PREFIX}{timestamp}_{size[0]}x{size[1]}.png"
+            output_path = os.path.join(OUTPUT_DIR, filename)
+            render_wallpaper(text, size, output_path)
+            print(f"✓ Wallpaper image generated for display {index + 1}: {output_path}")
+            by_size[size] = output_path
+        paths.append(by_size[size])
+    return paths
+
+
+def cleanup_old_wallpapers(keep, protect=()):
+    """
+    Delete older generated wallpapers, keeping the newest `keep` files.
+    Only touches files matching this script's own naming pattern, and never
+    deletes anything in `protect` (the images that were just set).
+    """
+    files = sorted(
+        glob.glob(os.path.join(OUTPUT_DIR, f"{FILE_PREFIX}*.png")),
+        key=os.path.getmtime,
+        reverse=True,
+    )
+    protected = {os.path.abspath(p) for p in protect}
+    for old in files[keep:]:
+        if os.path.abspath(old) in protected:
+            continue
+        try:
+            os.remove(old)
+        except OSError as e:
+            print(f"Could not remove {old}: {e}")
+
+
+def set_wallpapers(image_paths):
+    """
+    Set wallpapers via AppleScript: image_paths[i] goes on desktop i+1.
+    Note: this assumes System Events lists desktops in the same order as the
+    displays reported by detect_screen_sizes().
+    """
+    lines = []
+    for i, path in enumerate(image_paths, start=1):
+        escaped = os.path.abspath(path).replace("\\", "\\\\").replace('"', '\\"')
+        lines.append(f'        try\n            set picture of desktop {i} to "{escaped}"\n        end try')
+    applescript = 'tell application "System Events"\n' + "\n".join(lines) + "\nend tell"
+
+    try:
+        subprocess.run(
+            ["osascript", "-e", applescript],
+            capture_output=True,
+            text=True,
+            check=True,
         )
         return True
     except subprocess.CalledProcessError as e:
@@ -58,71 +164,37 @@ def set_wallpaper(image_path):
         return False
 
 
-def generate_wallpaper():
-    """Generate a new wallpaper image with the year progress percentage."""
-    # Ensure output directory exists
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-    
-    # Calculate percentage of year completed
-    now = datetime.now()
-    year_start = datetime(now.year, 1, 1, 0, 0, 0, 0)
-    year_end = datetime(now.year + 1, 1, 1, 0, 0, 0, 0)
-    
-    total_seconds_in_year = (year_end - year_start).total_seconds()
-    elapsed_seconds = (now - year_start).total_seconds()
-    
-    percentage = (elapsed_seconds / total_seconds_in_year) * 100
-    text = f"{percentage:.8f}"
-    
-    # Generate filename with timestamp
-    timestamp = now.strftime("%Y%m%d_%H%M%S")
-    filename = f"dynamic_wallpaper_{timestamp}.png"
-    output_path = os.path.join(OUTPUT_DIR, filename)
-    
-    # Create image
-    img = Image.new("RGB", (WIDTH, HEIGHT), BACKGROUND_COLOR)
-    draw = ImageDraw.Draw(img)
-    
-    try:
-        font = ImageFont.truetype(FONT_PATH, FONT_SIZE)
-    except Exception:
-        # Fallback to default font if system font not available
-        font = ImageFont.load_default()
-    
-    # Center text
-    bbox = draw.textbbox((0, 0), text, font=font)
-    text_width = bbox[2] - bbox[0]
-    text_height = bbox[3] - bbox[1]
-    
-    x = (WIDTH - text_width) / 2
-    y = (HEIGHT - text_height) / 2
-    
-    draw.text((x, y), text, fill=TEXT_COLOR, font=font)
-    
-    # Save the new image
-    img.save(output_path)
-    print(f"✓ Wallpaper image generated: {output_path}")
-    
-    return output_path
+def parse_args():
+    parser = argparse.ArgumentParser(description="Generate and set a year-progress wallpaper.")
+    parser.add_argument(
+        "--decimals", type=int, default=DEFAULT_DECIMALS,
+        help=f"Decimal places to show (default: {DEFAULT_DECIMALS}). Use fewer for slower update intervals.",
+    )
+    parser.add_argument(
+        "--keep", type=int, default=DEFAULT_KEEP,
+        help=f"Number of generated wallpaper files to keep on disk (default: {DEFAULT_KEEP}).",
+    )
+    return parser.parse_args()
 
 
 def main():
-    """Main function to generate and set wallpaper."""
+    args = parse_args()
+    keep = max(args.keep, 1)
     print("Generating new wallpaper...")
-    
+
     try:
-        # Generate the wallpaper
-        wallpaper_path = generate_wallpaper()
-        
-        # Set it as wallpaper
+        wallpaper_paths = generate_wallpapers(args.decimals)
+
         print("Setting wallpaper...")
-        if set_wallpaper(wallpaper_path):
-            print(f"✓ Wallpaper set successfully!")
-            print(f"  Image: {wallpaper_path}")
+        ok = set_wallpapers(wallpaper_paths)
+        cleanup_old_wallpapers(keep, protect=wallpaper_paths)
+
+        if ok:
+            print(f"✓ Wallpaper set successfully on {len(wallpaper_paths)} display(s)!")
         else:
             print("✗ Failed to set wallpaper, but image was generated.")
             sys.exit(1)
-            
+
     except Exception as e:
         print(f"✗ Error: {e}")
         sys.exit(1)

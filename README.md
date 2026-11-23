@@ -8,9 +8,10 @@ A macOS wallpaper generator that displays the percentage of the year that has el
 
 - 🎨 **Dynamic Year Progress**: Displays the exact percentage of the year completed (with 8 decimal precision)
 - 🔄 **Auto-Update**: Can be configured to update automatically every minute via launchd
-- 🖼️ **Customizable**: Adjustable resolution, colors, and font size
+- 🖥️ **Multi-Display**: Auto-detects every connected display and generates a wallpaper at each display's native resolution
+- 🖼️ **Customizable**: Adjustable colors, precision, and update interval
 - 🚀 **Easy to Use**: Double-click script or run from terminal
-- 💾 **Timestamped**: Each generated wallpaper is saved with a timestamp
+- 🧹 **Self-Cleaning**: Only the most recent wallpapers are kept on disk (default: 5)
 
 ## Requirements
 
@@ -161,16 +162,40 @@ If you've set up the launchd service (see **Step 4** in the Setup section above)
 
 ## Configuration
 
-Edit the configuration section in `generate_and_set_wallpaper.py`:
+### Command-line options
+
+```bash
+python3 generate_and_set_wallpaper.py --decimals 8 --keep 5
+```
+
+- `--decimals N`: decimal places shown (default `8`)
+- `--keep N`: number of generated wallpaper files to keep (default `5`)
+
+### Update interval
+
+The update interval is controlled by `StartInterval` (in seconds) in the launchd plist. You don't need 8 decimals at slower intervals, so pair them:
+
+| Interval | `StartInterval` | Suggested `--decimals` |
+|---|---|---|
+| Every minute (default) | `60` | `8` |
+| Hourly | `3600` | `4` |
+| Daily | `86400` | `2` |
+
+To pass options under launchd, add them as extra `<string>` entries after the script path in `ProgramArguments`, e.g. `<string>--decimals</string><string>4</string>`.
+
+### Script settings
+
+Edit the configuration section at the top of `generate_and_set_wallpaper.py`:
 
 ```python
-WIDTH, HEIGHT = 2560, 1600  # Resolution (adjust for your display)
 BACKGROUND_COLOR = "black"   # Background color
 TEXT_COLOR = "white"         # Text color
-FONT_SIZE = 300              # Font size
+FONT_SIZE_RATIO = 0.1875     # Font size as a fraction of display height
 OUTPUT_DIR = os.path.expanduser("~/wallpapers")  # Output directory
 FONT_PATH = "/System/Library/Fonts/SFNS.ttf"     # System font path
 ```
+
+Resolution is detected automatically; `DEFAULT_SIZE` is only a fallback.
 
 ## File Structure
 
@@ -187,12 +212,15 @@ wallpaper/
 ## Output
 
 Generated wallpapers are saved to `~/wallpapers/` with filenames like:
-- `dynamic_wallpaper_20250127_143022.png`
+- `dynamic_wallpaper_20250127_143022_2560x1600.png`
+
+Older generated files are deleted automatically (see `--keep`). Only files matching `dynamic_wallpaper_*.png` are touched.
 
 ## Notes
 
 - The wallpaper displays the percentage with 8 decimal places for precision
 - The script uses AppleScript to set the wallpaper, which requires macOS
+- With multiple displays, it assumes System Events lists desktops in the same order as the displays; if wallpapers land on the wrong screen, please open an issue
 - Logs for the launchd service are written to `/tmp/dynamicwallpaper.out` and `/tmp/dynamicwallpaper.err`
 - Make sure to grant necessary permissions if macOS prompts for accessibility access
 
